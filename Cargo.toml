@@ -1,0 +1,14 @@
+[workspace]
+members = ["echo", "echo_macro", "echo_tests", "echo_examples"]
+resolver = "3"
+
+
+[workspace.dependencies]
+godot = "0.5.5"
+ahash = "0.8.12"
+nohash-hasher = "0.2.0"
+smallvec = "1.15.1"
+syn = "3.0.4"
+quote = "1.0.40"
+proc-macro2 = "1.0.101"
+either = "1.15.0"
