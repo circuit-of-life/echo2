@@ -173,8 +173,7 @@ fn gallery(s: &mut GalleryState) {
 #[derive(GodotClass)]
 #[class(init, base = Control)]
 struct Gallery {
-    // `App` is a cheap handle, so it can sit next to the state it runs with.
-    app: Option<App<Node, GalleryState>>,
+    app: Option<App<Node>>,
     state: GalleryState,
     base: Base<Control>,
 }
@@ -183,9 +182,7 @@ struct Gallery {
 impl IControl for Gallery {
     fn ready(&mut self) {
         let root = self.to_gd().upcast::<Node>();
-        self.app = Some(App::new(root, |b, s: &mut GalleryState| {
-            gallery(b, s, &mut |_, _| {})
-        }));
+        self.app = Some(App::new(root));
 
         // When a signal used with `ON(..)` fires, the root emits `__echo_rerun(force_memo)`.
         // Running the app then is what lets `ON(..)` see the event.
@@ -215,7 +212,8 @@ impl Gallery {
             return;
         };
         let start = Instant::now();
-        app.run(&mut self.state, force_memo);
+        // The view can borrow anything; here, the state next to the app.
+        app.run(force_memo, |b| gallery(b, &mut self.state, &mut |_, _| {}));
         self.state.last_run = start.elapsed();
     }
 }

@@ -3,7 +3,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
 };
 
-use echo::{App, Body, Split, tree};
+use echo::{App, Body, tree};
 use godot::{
     classes::{
         Button, Control, HBoxContainer, HSlider, Label, LineEdit, PanelContainer, VBoxContainer,
@@ -97,7 +97,7 @@ pub fn run_all(parent: &Gd<Node>, filter: Option<&str>) -> bool {
         ("early_return_in_call", early_return_in_call),
         ("early_return_in_body", early_return_in_body),
         ("multiple_slots", multiple_slots),
-        ("split_state", split_state),
+        ("borrowed_state", borrowed_state),
     ];
     let mut failed = 0;
     let mut ran = 0;
@@ -2152,41 +2152,60 @@ fn multiple_slots(parent: &Gd<Node>) -> Result<(), String> {
     Ok(())
 }
 
+/// State that borrows, like a game context only handed out inside a callback.
+struct Scene<'a> {
+    text: &'a mut String,
+}
+fn with_scene<T>(text: &mut String, f: impl FnOnce(&mut Scene<'_>) -> T) -> T {
+    f(&mut Scene { text })
+}
+
 #[tree]
-fn split_view(n: &mut i32, text: &mut String) {
+fn borrowed_view(n: &mut i32, scene: &mut Scene<'_>) {
     Label..{
-        UPDATE(text = format!("{n} {text}"));
+        UPDATE(text = format!("{n} {}", scene.text));
     };
     Button..{
         if ON(pressed) {
             *n += 1;
-            text.push('!')
+            scene.text.push('!')
         }
     };
 }
-fn split_state(parent: &Gd<Node>) -> Result<(), String> {
+fn borrowed_state(parent: &Gd<Node>) -> Result<(), String> {
     let mut root = Node::new_alloc();
     parent.clone().add_child(&root);
-    let app: App<Node, (i32, String), Split> = App::new_split(root.clone(), |b, (n, text)| {
-        split_view(b, n, text, &mut |_, _| {})
-    });
+    let app = App::new(root.clone());
     let rerun = std::rc::Rc::new(Cell::new(false));
     let flag = rerun.clone();
     root.connect(
         "__echo_rerun",
         &Callable::from_fn("rerun", move |_| flag.set(true)),
     );
-    // the state's parts live in different places
+    // the view borrows from two places, one of them a fresh `Scene<'_>` for every run
     let mut n = 1;
     let mut text = String::from("a");
-    app.run((&mut n, &mut text), false);
+    let mut run = |force_memo| {
+        with_scene(&mut text, |scene| {
+            app.run(force_memo, |b| borrowed_view(b, &mut n, scene, &mut |_, _| {}))
+        })
+    };
+    check!(run(false).is_some());
     check_eq!(descs(&root), strs(&["Label:1 a", "Button:"]));
     kid(&root, 1).emit_signal("pressed", &[]);
     check!(rerun.replace(false));
-    app.run((&mut n, &mut text), true);
-    check_eq!((n, text.as_str()), (2, "a!"));
-    app.run((&mut n, &mut text), false);
+    run(true);
+    run(false);
     check_eq!(descs(&root), strs(&["Label:2 a!", "Button:"]));
+    check_eq!((n, text.as_str()), (2, "a!"));
+    // the view's value comes back out of `run`; a nested run is ignored
+    let app2 = app.clone();
+    let inner = app.run(false, |b| {
+        borrowed_view(b, &mut 5, &mut Scene { text: &mut text }, &mut |_, _| {});
+        app2.run(false, |_| ())
+    });
+    check_eq!(inner, Some(None));
+    check_eq!(descs(&root), strs(&["Label:5 a!", "Button:"]));
     root.queue_free();
     Ok(())
 }

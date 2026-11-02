@@ -40,32 +40,27 @@ echo_examples/run.sh            # opens a window with all of them
 
 ```rust
 // in ready()
-self.app = Some(App::new(root.clone(), |b, s: &mut Foo| {
-    // a tree function gets the builder first and a body last (here an empty one)
-    ui(b.upcast(), &mut s.app_state, &mut |_, _| {})
-}));
+self.app = Some(App::new(root.clone()));
 root.connect("__echo_rerun", &Callable::from_fn("rerun", move |args| {
-    let this = &mut *node.bind_mut();
-    let app = this.app.clone().unwrap();
-    app.run(this, args[0].to::<bool>());
+    node.bind_mut().run_ui(args[0].to::<bool>());
 }));
 
 // at the end of process()
-let app = self.app.clone().unwrap();
-app.run(self, false);
+self.run_ui(false);
+
+fn run_ui(&mut self, force_memo: bool) {
+    // `App` is a cheap handle (`Clone`), so it doesn't need to be taken out of `self`
+    let app = self.app.clone().unwrap();
+    // a tree function gets the builder first and a body last (here an empty one)
+    app.run(force_memo, |b| ui(b.upcast(), &mut self.app_state, &mut |_, _| {}));
+}
 ```
 
-`App` is a cheap handle (`Clone`), so it doesn't need to be taken out of the state to run it.
-
-State that lives in several places (say, your UI node's fields and another node's `bind_mut()`)
-can be passed as separate borrows by making it a tuple and `Split`ting it:
+The view is passed to every `run`, so it borrows whatever that run has: several fields, another
+node's `bind_mut()`, or a context that's only lent to a callback:
 
 ```rust
-self.app = Some(App::new_split(root.clone(), |b, (game, settings)| {
-    ui(b.upcast(), game, settings, &mut |_, _| {})
-}));
-// field: app: Option<App<Control, (Game, Settings), Split>>
-app.run((&mut *game_node.bind_mut(), &mut self.settings), false);
+app.run(false, |b| ui(b.upcast(), &mut self.settings, &mut *game.bind_mut(), &mut |_, _| {}));
 ```
 
 When a signal checked with `ON(..)` fires, the root emits `__echo_rerun(true)`; run the app

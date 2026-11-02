@@ -24,6 +24,7 @@ removed form is a compile error that says what replaced it, so the compiler can 
 | `{ let n = ..; }` leaks `n` to later elements | `{ }` is a normal block scope; write `let n = ..;` directly |
 | `for` always needs `KEY(..)` | only loops that create nodes / state / memos / calls need it |
 | `ui(b.upcast(), s, &mut \|b, ()\| b).cast()` | `ui(b.upcast(), s, &mut \|_, _\| {})` |
+| `App::new(root, \|b, s\| ui(..))` + `app.run(state, force)` | `App::new(root)` + `app.run(force, \|b\| ui(..))` |
 | `app.run(..)` needs `&mut app` | `app.run(..)` takes `&self`; `App` is `Clone` |
 
 ---
@@ -33,43 +34,37 @@ removed form is a compile error that says what replaced it, so the compiler can 
 The setup is the same three parts as before: create an `App` in `ready`, run it every frame, and
 run it again (with the given `force_memo`) when the root emits `__echo_rerun`. Three things changed.
 
-**The view closure doesn't return a builder any more.** Tree functions return their own value
-(usually `()`), and an empty body written by hand is `&mut |_, _| {}`:
+**The view is passed to `run`, not to `App::new`.** `App` has no state type any more
+(`App<Control>`, not `App<Control, Foo>`), and the view closure takes just the builder. It can
+borrow anything, from as many places as it likes, including things only lent to a callback.
+Since both `process` and the `__echo_rerun` handler run the same view, a small method helps:
 
 ```rust
 // before
 self.app = Some(App::new(root.clone(), |b, s: &mut Foo| {
     ui(b.upcast(), &mut s.app_state, &mut |b, ()| b).cast()
 }));
-
-// after
-self.app = Some(App::new(root.clone(), |b, s: &mut Foo| {
-    ui(b.upcast(), &mut s.app_state, &mut |_, _| {})
-}));
-```
-
-`App::new` accepts a closure returning anything and ignores the value.
-
-**`run` takes `&self`, and `App` is a cheap `Clone` handle.** There's no need to take the app out
-of the state to run it any more:
-
-```rust
-// before
+// ..
 let mut app = self.app.take().unwrap();
-app.run(self, false);
+app.run(self, force_memo);
 self.app = Some(app);
 
-// after (the old form still compiles, with an "unused mut" warning)
-let app = self.app.clone().unwrap();
-app.run(self, false);
-
-// or, with the app next to its state rather than inside it
-self.app.as_ref().unwrap().run(&mut self.state, false);
+// after
+self.app = Some(App::new(root.clone()));
+// ..
+fn run_ui(&mut self, force_memo: bool) {
+    let app = self.app.clone().unwrap();
+    app.run(force_memo, |b| ui(b.upcast(), &mut self.app_state, &mut |_, _| {}));
+}
 ```
 
-**State can be split (new).** If the state lives in several places, make it a tuple and pass
-the parts separately: `App<Control, (Game, Settings), Split>`, made with `App::new_split`, runs
-with `app.run((&mut game, &mut settings), ..)`. `App<Control, Foo>` works as before.
+**The view doesn't return a builder any more.** Tree functions return their own value (usually
+`()`), and an empty body written by hand is `&mut |_, _| {}`. `run` returns `Some(value)` with
+whatever the view returned.
+
+**`run` takes `&self`, and `App` is a cheap `Clone` handle.** There's no need to take the app out
+of the state to run it any more: clone it (as above), or if the view only needs other fields,
+borrow it in place with `if let Some(app) = &self.app { app.run(.., |b| ui(b, &mut self.state, ..)) }`.
 
 **Re-entrancy is handled.** Calling `run` while the app is already running logs a warning and
 does nothing. Signals emitted *during* a run are ignored, because they come from echo's own
@@ -209,8 +204,8 @@ if changed { /* .. */ }
 ### Calling a tree function from plain Rust
 
 The generated signature is `fn f(builder, ..your parameters.., body) -> YourReturnType`, where
-`body` is your `Body` parameter or the hidden one. From plain Rust (usually just the `App`
-closure), pass the builder first and a body last:
+`body` is your `Body` parameter or the hidden one. From plain Rust (usually just the view
+passed to `app.run`), pass the builder first and a body last:
 
 ```rust
 ui(b, &mut state, &mut |_, _| {});

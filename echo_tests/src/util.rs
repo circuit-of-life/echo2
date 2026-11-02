@@ -3,24 +3,27 @@ use std::{cell::Cell, rc::Rc};
 use echo::{App, Builder};
 use godot::prelude::*;
 
+type View<S> = Box<dyn FnMut(Builder<Node>, &mut S)>;
+
 /// An `App` mounted under a fresh root node, plus a flag that records `__echo_rerun` requests
 /// instead of re-running immediately (so tests control exactly when runs happen).
-pub struct Harness<S: 'static> {
+pub struct Harness<S> {
     pub root: Gd<Node>,
-    pub app: App<Node, S>,
+    pub app: App<Node>,
     pub state: S,
+    view: View<S>,
     pub rerun_requested: Rc<Cell<bool>>,
 }
 
-impl<S: 'static> Harness<S> {
+impl<S> Harness<S> {
     pub fn new<R>(
         parent: &Gd<Node>,
         state: S,
-        view: impl FnMut(Builder<Node>, &mut S) -> R + 'static,
+        mut view: impl FnMut(Builder<Node>, &mut S) -> R + 'static,
     ) -> Self {
         let mut root = Node::new_alloc();
         parent.clone().add_child(&root);
-        let app = App::new(root.clone(), view);
+        let app = App::new(root.clone());
         let rerun_requested = Rc::new(Cell::new(false));
         let flag = rerun_requested.clone();
         root.connect(
@@ -31,26 +34,33 @@ impl<S: 'static> Harness<S> {
             root,
             app,
             state,
+            view: Box::new(move |b, s| {
+                view(b, s);
+            }),
             rerun_requested,
         }
     }
     pub fn run(&mut self) {
-        self.app.run(&mut self.state, false);
+        self.run_with(false);
     }
     pub fn run_forced(&mut self) {
-        self.app.run(&mut self.state, true);
+        self.run_with(true);
+    }
+    fn run_with(&mut self, force_memo: bool) {
+        let (view, state) = (&mut self.view, &mut self.state);
+        self.app.run(force_memo, |b| view(b, state));
     }
     /// Performs the rerun a signal asked for, if any. Returns whether one was requested.
     pub fn pump(&mut self) -> bool {
         let requested = self.rerun_requested.replace(false);
         if requested {
-            self.app.run(&mut self.state, true);
+            self.run_with(true);
         }
         requested
     }
 }
 
-impl<S: 'static> Drop for Harness<S> {
+impl<S> Drop for Harness<S> {
     fn drop(&mut self) {
         if self.root.is_instance_valid() {
             self.root.queue_free();
