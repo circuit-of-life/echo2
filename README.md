@@ -1,7 +1,3 @@
-# Written by Me flow for 99% of its life
-
-# then ULTRACHARGED by CLOD CODE!!!!!!!!!!!!!!!!!!!!!!!!!!. he made it fast n shit. im sory
-
 # echo
 
 Immediate-mode-style UI for Godot in Rust: write a function that describes the node tree for the
@@ -60,9 +56,21 @@ app.run(self, false);
 ```
 
 `App` is a cheap handle (`Clone`), so it doesn't need to be taken out of the state to run it.
+
+State that lives in several places (say, your UI node's fields and another node's `bind_mut()`)
+can be passed as separate borrows by making it a tuple and `Split`ting it:
+
+```rust
+self.app = Some(App::new_split(root.clone(), |b, (game, settings)| {
+    ui(b.upcast(), game, settings, &mut |_, _| {})
+}));
+// field: app: Option<App<Control, (Game, Settings), Split>>
+app.run((&mut *game_node.bind_mut(), &mut self.settings), false);
+```
+
 When a signal checked with `ON(..)` fires, the root emits `__echo_rerun(true)`; run the app
 with that flag and `ON(signal)` is `Some(args)` during that run, where it's checked. Signals
-emitted _during_ a run (e.g. setting `value` makes a slider emit `value_changed`) are ignored,
+emitted *during* a run (e.g. setting `value` makes a slider emit `value_changed`) are ignored,
 and calling `run` while running does nothing, so this can't re-enter. Connecting
 `__echo_rerun` deferred is fine too: an event waits until a run reaches its `ON`.
 

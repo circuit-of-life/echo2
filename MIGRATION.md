@@ -1,6 +1,7 @@
 # Migrating to the reworked echo
 
-This covers everything that changed between the old crate and the rework: what you write differently, and what behaves differently even if you don't.
+This covers everything that changed between the old crate (`main`, `6b9996a`) and the rework
+(`echo-rework`): what you write differently, and what behaves differently even if you don't.
 
 Most of the DSL is the same. The changes are concentrated in four places: how tree functions take
 a body and pass values around, signal handlers (`ON`), state (`STATE`), and `{ }` blocks. Every
@@ -8,22 +9,22 @@ removed form is a compile error that says what replaced it, so the compiler can 
 
 ## At a glance
 
-| Old                                                   | New                                                                         |
-| ----------------------------------------------------- | --------------------------------------------------------------------------- |
-| `#[tree(Node())]`                                     | `#[tree]`                                                                   |
-| `#[tree(VBoxContainer(i32) in PanelContainer)]`       | `#[tree(in PanelContainer)]` + a `body: Body<VBoxContainer, i32>` parameter |
-| `BODY(42);`                                           | `body(42);`                                                                 |
-| `f(x)..{ let (a, b) = ARGS; .. };`                    | `f(x)..\|a, b\| { .. };`                                                    |
-| tree functions return a `Builder`                     | they return their own value: `let v = f(x)..{};`                            |
-| `ON(pressed = \|_\| ..);`                             | `if ON(pressed) { .. }`                                                     |
-| `ON(value_changed = \|args\| ..);`                    | `if let Some(args) = ON(value_changed) { .. }`                              |
-| `STATE(x = \|\| init);` (`Rc<RefCell<T>>`)            | `let mut x = STATE(init);`                                                  |
-| `STATE(*x = \|\| init);` (`Rc<Cell<T>>`)              | `let mut x = STATE(init);`                                                  |
-| `x.get()`, `x.set(v)`, `x.borrow()`, `x.borrow_mut()` | `*x`, `*x = v`, `x`, `x` (it derefs)                                        |
-| `{ let n = ..; }` leaks `n` to later elements         | `{ }` is a normal block scope; write `let n = ..;` directly                 |
-| `for` always needs `KEY(..)`                          | only loops that create nodes / state / memos / calls need it                |
-| `ui(b.upcast(), s, &mut \|b, ()\| b).cast()`          | `ui(b.upcast(), s, &mut \|_, _\| {})`                                       |
-| `app.run(..)` needs `&mut app`                        | `app.run(..)` takes `&self`; `App` is `Clone`                               |
+| Old | New |
+|---|---|
+| `#[tree(Node())]` | `#[tree]` |
+| `#[tree(VBoxContainer(i32) in PanelContainer)]` | `#[tree(in PanelContainer)]` + a `body: Body<VBoxContainer, i32>` parameter |
+| `BODY(42);` | `body(42);` |
+| `f(x)..{ let (a, b) = ARGS; .. };` | `f(x)..\|a, b\| { .. };` |
+| tree functions return a `Builder` | they return their own value: `let v = f(x)..{};` |
+| `ON(pressed = \|_\| ..);` | `if ON(pressed) { .. }` |
+| `ON(value_changed = \|args\| ..);` | `if let Some(args) = ON(value_changed) { .. }` |
+| `STATE(x = \|\| init);` (`Rc<RefCell<T>>`) | `let mut x = STATE(init);` |
+| `STATE(*x = \|\| init);` (`Rc<Cell<T>>`) | `let mut x = STATE(init);` |
+| `x.get()`, `x.set(v)`, `x.borrow()`, `x.borrow_mut()` | `*x`, `*x = v`, `x`, `x` (it derefs) |
+| `{ let n = ..; }` leaks `n` to later elements | `{ }` is a normal block scope; write `let n = ..;` directly |
+| `for` always needs `KEY(..)` | only loops that create nodes / state / memos / calls need it |
+| `ui(b.upcast(), s, &mut \|b, ()\| b).cast()` | `ui(b.upcast(), s, &mut \|_, _\| {})` |
+| `app.run(..)` needs `&mut app` | `app.run(..)` takes `&self`; `App` is `Clone` |
 
 ---
 
@@ -66,8 +67,12 @@ app.run(self, false);
 self.app.as_ref().unwrap().run(&mut self.state, false);
 ```
 
+**State can be split (new).** If the state lives in several places, make it a tuple and pass
+the parts separately: `App<Control, (Game, Settings), Split>`, made with `App::new_split`, runs
+with `app.run((&mut game, &mut settings), ..)`. `App<Control, Foo>` works as before.
+
 **Re-entrancy is handled.** Calling `run` while the app is already running logs a warning and
-does nothing. Signals emitted _during_ a run are ignored, because they come from echo's own
+does nothing. Signals emitted *during* a run are ignored, because they come from echo's own
 changes: for example, `UPDATE(value = ..)` makes a slider emit `value_changed`. Previously such a
 signal re-entered your `__echo_rerun` handler in the middle of a run, which with the `bind_mut()` +
 `take().unwrap()` setup means an "already bound" panic, or at best a needless rerun.
@@ -129,11 +134,11 @@ fn pair(body: Body<VBoxContainer, (i32, String)>) {
 }
 ```
 
-| Body arguments | Old attribute    | New parameter                  | Placed with  |
-| -------------- | ---------------- | ------------------------------ | ------------ |
-| none           | `X()`            | `body: Body<X>`                | `body()`     |
-| one            | `X(i32)`         | `body: Body<X, i32>`           | `body(42)`   |
-| several        | `X(i32, String)` | `body: Body<X, (i32, String)>` | `body(1, s)` |
+| Body arguments | Old attribute | New parameter | Placed with |
+|---|---|---|---|
+| none | `X()` | `body: Body<X>` | `body()` |
+| one | `X(i32)` | `body: Body<X, i32>` | `body(42)` |
+| several | `X(i32, String)` | `body: Body<X, (i32, String)>` | `body(1, s)` |
 
 A function that never places a body doesn't need the parameter; the macro adds an unused one. One
 argument is now passed as-is: before, it was a 1-tuple `(a,)`.
@@ -279,14 +284,14 @@ What's different:
   function returning `()` this compiles, and silently skips the rest of the view for that run. To
   leave just the handler, use a labeled block:
 
-    ```rust
-    if ON(pressed) {
-        'h: {
-            if !valid { break 'h; }
-            s.apply();
-        }
-    }
-    ```
+  ```rust
+  if ON(pressed) {
+      'h: {
+          if !valid { break 'h; }
+          s.apply();
+      }
+  }
+  ```
 
 - **`break`, `continue` and `?` act on the surrounding code**, like any `if`. Handlers can also
   move captured values freely.
@@ -294,7 +299,7 @@ What's different:
   (`ON(a) || ON(b)`), `b` isn't checked on a run where `a` fired. To check both reliably, check them
   into variables first.
 
-A tip that applies to old code too: within a node, check its events _before_ the `UPDATE`s that
+A tip that applies to old code too: within a node, check its events *before* the `UPDATE`s that
 show what they change. The run a signal causes goes top to bottom, so otherwise it first sets the
 node back to the old value. For a text field that also moves the caret.
 
@@ -330,14 +335,14 @@ let mut items: Vec<String> = STATE(Vec::new());
 items.push(x);
 ```
 
-| Old use                                       | New use                                                       |
-| --------------------------------------------- | ------------------------------------------------------------- |
-| `x.get()`                                     | `*x`                                                          |
-| `x.set(v)`                                    | `*x = v`                                                      |
-| `x.borrow().len()`, `x.borrow_mut().push(..)` | `x.len()`, `x.push(..)`                                       |
-| `*x.borrow_mut() = v`                         | `*x = v`                                                      |
-| `&*x.borrow()`, passing `x.borrow_mut()`      | `&*x`, `&mut *x` (or `&x` / `&mut x`, through deref coercion) |
-| `format!("{}", x.get())`                      | `format!("{x}")` (Display and Debug forward to the value)     |
+| Old use | New use |
+|---|---|
+| `x.get()` | `*x` |
+| `x.set(v)` | `*x = v` |
+| `x.borrow().len()`, `x.borrow_mut().push(..)` | `x.len()`, `x.push(..)` |
+| `*x.borrow_mut() = v` | `*x = v` |
+| `&*x.borrow()`, passing `x.borrow_mut()` | `&*x`, `&mut *x` (or `&x` / `&mut x`, through deref coercion) |
+| `format!("{}", x.get())` | `format!("{x}")` (Display and Debug forward to the value) |
 
 Details:
 
@@ -393,15 +398,15 @@ Unchanged, plus:
 
 - **`let a = Label..{ .. };` binds the node** (`Gd<Label>`) for the code after it. For example, to
   give the input focus back after clicking "Add":
-    ```rust
-    let mut input = LineEdit..{ /* .. */ };
-    Button..{
-        if ON(pressed) {
-            s.add();
-            input.grab_focus()
-        }
-    };
-    ```
+  ```rust
+  let mut input = LineEdit..{ /* .. */ };
+  Button..{
+      if ON(pressed) {
+          s.add();
+          input.grab_focus()
+      }
+  };
+  ```
 - **Paths work as node types:** `godot::classes::Label..{}`.
 - **`INIT`/`UPDATE` take raw identifiers:** `INIT(r#type = ..)` sets `type` (it used to set
   `r#type`).
@@ -456,30 +461,30 @@ make that sturdier:
 These need no code changes, but your UI behaves differently. They were all bugs in the old
 version.
 
-| Situation                                                       | Before                                                                                   | Now                                             |
-| --------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Keyed `for`: an item is removed, inserted or reordered          | the rows after it were recreated (nodes, focus and `STATE` lost)                         | each item keeps its nodes, wherever it moves    |
-| Element after a `for` whose list changed length                 | recreated                                                                                | kept                                            |
-| Something before a skipped `MEMO` appears or disappears         | children came out in the wrong order                                                     | correct order                                   |
-| `ON` inside an `if` or `MEMO`                                   | panicked: "no entry found for key"                                                       | works                                           |
-| An `ON` skipped for a run, then checked again                   | its signal never fired again                                                             | reconnected                                     |
-| `UPDATE` makes a node emit a signal (e.g. slider `value`)       | re-entered the app mid-run (a `bind_mut` panic with the usual setup) or a needless rerun | ignored: echo's own change, not input           |
-| A node echo made is freed from outside                          | next run panicked                                                                        | recreated                                       |
-| `__echo_rerun` connected deferred, `ON` inside a skipped `MEMO` | event lost                                                                               | event delivered on the next run that reaches it |
-| Early `return` in a tree function or body                       | could hand later elements the wrong nodes                                                | contained                                       |
+| Situation | Before | Now |
+|---|---|---|
+| Keyed `for`: an item is removed, inserted or reordered | the rows after it were recreated (nodes, focus and `STATE` lost) | each item keeps its nodes, wherever it moves |
+| Element after a `for` whose list changed length | recreated | kept |
+| Something before a skipped `MEMO` appears or disappears | children came out in the wrong order | correct order |
+| `ON` inside an `if` or `MEMO` | panicked: "no entry found for key" | works |
+| An `ON` skipped for a run, then checked again | its signal never fired again | reconnected |
+| `UPDATE` makes a node emit a signal (e.g. slider `value`) | re-entered the app mid-run (a `bind_mut` panic with the usual setup) or a needless rerun | ignored: echo's own change, not input |
+| A node echo made is freed from outside | next run panicked | recreated |
+| `__echo_rerun` connected deferred, `ON` inside a skipped `MEMO` | event lost | event delivered on the next run that reaches it |
+| Early `return` in a tree function or body | could hand later elements the wrong nodes | contained |
 
 ## Performance
 
 Measured with the crate's benchmarks (`echo_tests`), before and after the rework:
 
-|                                                           | Before  | After   |
-| --------------------------------------------------------- | ------- | ------- |
-| Rerun, 1000 rows, nothing changed (release)               | 2.7 ms  | 0.77 ms |
-| Same, each row in a `MEMO`                                | 0.20 ms | 0.10 ms |
-| 1000 rows reordered                                       | 182 ms  | 1.5 ms  |
-| Deep tree, 1000 nested calls                              | 2.1 ms  | 0.40 ms |
-| Release build of a 3300-line tree file                    | 43 s    | 4 s     |
-| rust-analyzer, after an edit in an 800-line tree function | 1.8 s   | 0.4 s   |
+| | Before | After |
+|---|---|---|
+| Rerun, 1000 rows, nothing changed (release) | 2.7 ms | 0.77 ms |
+| Same, each row in a `MEMO` | 0.20 ms | 0.10 ms |
+| 1000 rows reordered | 182 ms | 1.5 ms |
+| Deep tree, 1000 nested calls | 2.1 ms | 0.40 ms |
+| Release build of a 3300-line tree file | 43 s | 4 s |
+| rust-analyzer, after an edit in an 800-line tree function | 1.8 s | 0.4 s |
 
 ---
 
@@ -487,11 +492,11 @@ Measured with the crate's benchmarks (`echo_tests`), before and after the rework
 
 Old forms fail to compile with a message saying what replaced them:
 
-| Old form                                | Error says                                                                                                         |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `#[tree(VBoxContainer(i32) in P)]`      | expected `#[tree]` or `#[tree(in ParentNode)]` … take the body as the last parameter, `body: Body<BodyNode, Args>` |
-| `BODY(..)`                              | `BODY(..)` is gone: take a `body: Body<..>` parameter (the last one) and call it, `body(..)`                       |
-| `let (..) = ARGS;`                      | `let (..) = ARGS;` is gone: take the arguments as the body's parameters, `func(..)..\|a, b\| { .. }`               |
-| `ON(signal = handler);`                 | `ON(signal = handler)` is gone: write the handler as an `if` …                                                     |
-| `STATE(x = \|\| init);`                 | state is declared with `let`: `let mut name = STATE(initial value);`                                               |
-| `x.get()` / `x.borrow()` on a new state | no method named `get` / `borrow` found for `StateMut<..>`                                                          |
+| Old form | Error says |
+|---|---|
+| `#[tree(VBoxContainer(i32) in P)]` | expected `#[tree]` or `#[tree(in ParentNode)]` … take the body as the last parameter, `body: Body<BodyNode, Args>` |
+| `BODY(..)` | `BODY(..)` is gone: take a `body: Body<..>` parameter (the last one) and call it, `body(..)` |
+| `let (..) = ARGS;` | `let (..) = ARGS;` is gone: take the arguments as the body's parameters, `func(..)..\|a, b\| { .. }` |
+| `ON(signal = handler);` | `ON(signal = handler)` is gone: write the handler as an `if` … |
+| `STATE(x = \|\| init);` | state is declared with `let`: `let mut name = STATE(initial value);` |
+| `x.get()` / `x.borrow()` on a new state | no method named `get` / `borrow` found for `StateMut<..>` |

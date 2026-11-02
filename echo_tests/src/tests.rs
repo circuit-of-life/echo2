@@ -3,7 +3,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
 };
 
-use echo::{Body, tree};
+use echo::{App, Body, Split, tree};
 use godot::{
     classes::{
         Button, Control, HBoxContainer, HSlider, Label, LineEdit, PanelContainer, VBoxContainer,
@@ -96,6 +96,8 @@ pub fn run_all(parent: &Gd<Node>, filter: Option<&str>) -> bool {
         ("bodies_borrow_locals", bodies_borrow_locals),
         ("early_return_in_call", early_return_in_call),
         ("early_return_in_body", early_return_in_body),
+        ("multiple_slots", multiple_slots),
+        ("split_state", split_state),
     ];
     let mut failed = 0;
     let mut ran = 0;
@@ -2078,5 +2080,113 @@ fn early_return_in_body(parent: &Gd<Node>) -> Result<(), String> {
     h.run();
     check_eq!(descs(&vbox), strs(&["Label:first", "Label:wrap tail"]));
     check_eq!(id(&kid(&vbox, 1)), tail);
+    Ok(())
+}
+
+/// Several bodies: one body, told which slot it's filling.
+#[derive(Clone, Copy)]
+enum Slot {
+    Header,
+    Content,
+}
+#[tree]
+fn dialog(title: &str, body: Body<godot::classes::BoxContainer, Slot>) {
+    VBoxContainer..{
+        HBoxContainer..{
+            Label..{
+                UPDATE(text = title.to_string());
+            };
+            body(Slot::Header)
+        };
+        VBoxContainer..{ body(Slot::Content) };
+    };
+}
+struct DialogState {
+    volume: i32,
+    closed: bool,
+}
+#[tree]
+fn dialog_view(s: &mut DialogState) {
+    dialog("Settings")..|slot| match slot {
+        Slot::Header => {
+            Button..{
+                INIT(text = "close");
+                if ON(pressed) {
+                    s.closed = true
+                }
+            };
+        }
+        Slot::Content => {
+            Label..{
+                UPDATE(text = format!("volume {}", s.volume));
+            };
+            Button..{
+                INIT(text = "louder");
+                if ON(pressed) {
+                    s.volume += 1
+                }
+            };
+        }
+    };
+}
+fn multiple_slots(parent: &Gd<Node>) -> Result<(), String> {
+    let state = DialogState {
+        volume: 0,
+        closed: false,
+    };
+    let mut h = Harness::new(parent, state, |b, s| dialog_view(b, s, &mut |_, _| {}));
+    h.run();
+    let dialog = kid(&h.root, 0);
+    let (header, content) = (kid(&dialog, 0), kid(&dialog, 1));
+    check_eq!(descs(&header), strs(&["Label:Settings", "Button:close"]));
+    check_eq!(descs(&content), strs(&["Label:volume 0", "Button:louder"]));
+    let before = (ids(&header), ids(&content));
+    kid(&content, 1).emit_signal("pressed", &[]);
+    check!(h.pump());
+    h.run();
+    check_eq!(descs(&content), strs(&["Label:volume 1", "Button:louder"]));
+    kid(&header, 1).emit_signal("pressed", &[]);
+    check!(h.pump());
+    check!(h.state.closed);
+    check_eq!((ids(&header), ids(&content)), before);
+    Ok(())
+}
+
+#[tree]
+fn split_view(n: &mut i32, text: &mut String) {
+    Label..{
+        UPDATE(text = format!("{n} {text}"));
+    };
+    Button..{
+        if ON(pressed) {
+            *n += 1;
+            text.push('!')
+        }
+    };
+}
+fn split_state(parent: &Gd<Node>) -> Result<(), String> {
+    let mut root = Node::new_alloc();
+    parent.clone().add_child(&root);
+    let app: App<Node, (i32, String), Split> = App::new_split(root.clone(), |b, (n, text)| {
+        split_view(b, n, text, &mut |_, _| {})
+    });
+    let rerun = std::rc::Rc::new(Cell::new(false));
+    let flag = rerun.clone();
+    root.connect(
+        "__echo_rerun",
+        &Callable::from_fn("rerun", move |_| flag.set(true)),
+    );
+    // the state's parts live in different places
+    let mut n = 1;
+    let mut text = String::from("a");
+    app.run((&mut n, &mut text), false);
+    check_eq!(descs(&root), strs(&["Label:1 a", "Button:"]));
+    kid(&root, 1).emit_signal("pressed", &[]);
+    check!(rerun.replace(false));
+    app.run((&mut n, &mut text), true);
+    check_eq!((n, text.as_str()), (2, "a!"));
+    app.run((&mut n, &mut text), false);
+    check_eq!(descs(&root), strs(&["Label:2 a!", "Button:"]));
+    root.queue_free();
     Ok(())
 }

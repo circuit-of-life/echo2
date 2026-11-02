@@ -5,7 +5,7 @@ use godot::prelude::*;
 
 /// An `App` mounted under a fresh root node, plus a flag that records `__echo_rerun` requests
 /// instead of re-running immediately (so tests control exactly when runs happen).
-pub struct Harness<S> {
+pub struct Harness<S: 'static> {
     pub root: Gd<Node>,
     pub app: App<Node, S>,
     pub state: S,
@@ -50,7 +50,7 @@ impl<S: 'static> Harness<S> {
     }
 }
 
-impl<S> Drop for Harness<S> {
+impl<S: 'static> Drop for Harness<S> {
     fn drop(&mut self) {
         if self.root.is_instance_valid() {
             self.root.queue_free();
