@@ -3,7 +3,7 @@
 use std::rc::Rc;
 
 use echo::{
-    App, Builder,
+    Builder, EchoApp,
     memory::{Handle, Memory, Node},
 };
 
@@ -14,7 +14,7 @@ type View<S> = Box<dyn FnMut(Builder<Node>, &mut S)>;
 pub struct Harness<S> {
     pub memory: Rc<Memory>,
     pub root: Handle<Node>,
-    pub app: App<Node>,
+    pub app: EchoApp<Node>,
     pub state: S,
     view: View<S>,
 }
@@ -23,7 +23,7 @@ impl<S> Harness<S> {
     pub fn new<R>(state: S, mut view: impl FnMut(Builder<Node>, &mut S) -> R + 'static) -> Self {
         let memory = Memory::new();
         let root = memory.root();
-        let app = App::new(memory.clone(), root.id());
+        let app = EchoApp::new(memory.clone(), root.id());
         Self {
             memory,
             root,
