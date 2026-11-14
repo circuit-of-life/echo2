@@ -16,7 +16,6 @@ use syn::{
 };
 
 mod kw {
-    syn::custom_keyword!(theme);
     syn::custom_keyword!(INIT);
     syn::custom_keyword!(UPDATE);
     syn::custom_keyword!(ON);
@@ -150,9 +149,10 @@ pub struct Arm {
     guard: Option<Expr>,
     body: Block,
 }
+/// `name = value`, or `name(args..) = value`: `__node.set_name(args.., value)`.
 pub struct Assignment {
-    theme: Option<Ident>,
     name: Ident,
+    args: Option<Punctuated<Expr, Token![,]>>,
     value: Expr,
 }
 
@@ -224,28 +224,17 @@ impl Parse for IfElem {
 
 impl Parse for Assignment {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let name;
-        let theme = if input.peek(kw::theme) && input.peek2(token::Paren) {
-            input.parse::<kw::theme>()?;
+        let name = input.call(Ident::parse_any)?;
+        let args = if input.peek(token::Paren) {
             let inner;
             parenthesized!(inner in input);
-            let typ = inner.parse::<Ident>()?;
-            inner.parse::<Token![,]>()?;
-            name = inner.call(Ident::parse_any)?;
-            if inner.peek(Token![,]) {
-                inner.parse::<Token![,]>()?;
-            }
-            if !inner.is_empty() {
-                return Err(inner.error("expected `theme(kind, name)`"));
-            }
-            Some(typ)
+            Some(Punctuated::parse_terminated(&inner)?)
         } else {
-            name = input.call(Ident::parse_any)?;
             None
         };
         input.parse::<Token![=]>()?;
         let value = input.parse()?;
-        Ok(Assignment { theme, name, value })
+        Ok(Assignment { name, args, value })
     }
 }
 
@@ -854,7 +843,7 @@ pub fn expand_body_type(ty: &syn::Type) -> Option<syn::Type> {
     }
     let node = types
         .first()
-        .map_or_else(|| quote! { ::godot::classes::Node }, |t| quote! { #t });
+        .map_or_else(|| quote! { ::echo::AnyNode }, |t| quote! { #t });
     let args = types
         .get(1)
         .map_or_else(|| quote! { () }, |t| quote! { #t });
@@ -1038,19 +1027,27 @@ impl Parse for Block {
     }
 }
 
+/// A signal's name as a string (`r#type` is `"type"`).
 fn prop_name(name: &Ident) -> LitStr {
     LitStr::new(&name.unraw().to_string(), name.span())
 }
 
+/// The setter call for one assignment, on the `__node` handle (spanned at the name, so a
+/// property the element doesn't have is reported there).
 fn gen_assignment(a: Assignment) -> TokenStream {
-    let name = prop_name(&a.name);
+    let setter = format_ident!("set_{}", a.name.unraw(), span = a.name.span());
     let value = a.value;
-    match a.theme {
-        Some(theme) => {
-            let func = format_ident!("__set_theme_{}_override", theme, span = theme.span());
-            quote! { __builder.#func(#name, #value); }
-        }
-        None => quote! { __builder.__set_prop(#name, #value); },
+    let args = a.args.into_iter().flatten();
+    quote! { __node.#setter(#(#args,)* #value); }
+}
+
+/// `INIT`/`UPDATE`'s assignments, with the node's handle.
+fn gen_assignments(list: Punctuated<Assignment, Token![,]>) -> TokenStream {
+    let sets: TokenStream = list.into_iter().map(gen_assignment).collect();
+    quote! {
+        #[allow(unused_mut)]
+        let mut __node = __builder.node();
+        #sets
     }
 }
 
@@ -1065,8 +1062,7 @@ fn takes_no_position(ts: &TokenStream) -> bool {
             matches!(toks.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == '.')
                 && matches!(toks.get(i + 2), Some(TokenTree::Ident(m)) if {
                     let m = m.to_string();
-                    matches!(m.as_str(), "__signal" | "__set_prop" | "init" | "node" | "path" | "forcing_memos")
-                        || m.starts_with("__set_theme_")
+                    matches!(m.as_str(), "__signal" | "init" | "node" | "path" | "forcing_memos")
                 })
         }
         TokenTree::Group(g) => takes_no_position(&g.stream()),
@@ -1223,7 +1219,7 @@ fn gen_view_closure(
             .push(typed("__body", parse_quote! { ::echo::Body<'_> }));
         format_ident!("__body")
     });
-    let usable = usable.map_or_else(|| quote! { ::godot::classes::Node }, |u| quote! { #u });
+    let usable = usable.map_or_else(|| quote! { ::echo::AnyNode }, |u| quote! { #u });
     closure.inputs.insert(
         0,
         typed("__builder", parse_quote! { ::echo::Builder<#usable> }),
@@ -1284,7 +1280,7 @@ fn gen_elems(block: Block, tail: bool) -> TokenStream {
                 });
             }
             BlockElem::Init(list) => {
-                let sets: TokenStream = list.into_iter().map(gen_assignment).collect();
+                let sets = gen_assignments(list);
                 out.extend(quote! {
                     if __builder.init() {
                         #sets
@@ -1292,7 +1288,8 @@ fn gen_elems(block: Block, tail: bool) -> TokenStream {
                 });
             }
             BlockElem::Update(list) => {
-                out.extend(list.into_iter().map(gen_assignment));
+                let sets = gen_assignments(list);
+                out.extend(quote! { { #sets } });
             }
             BlockElem::LetState {
                 mutability,

@@ -10,10 +10,10 @@
 //! subtree. A skipped `MEMO` touches nothing inside it, so its subtree is kept as is, at O(1) cost
 //! instead of re-marking every entry inside it.
 //!
-//! Child order is kept without asking Godot where each child is: a node is known to still be at
-//! the index it was placed at last run as long as, in its parent, nothing was created or moved
-//! earlier in this run, and nothing changed it from outside (watched through the parent's
-//! `child_order_changed`).
+//! Child order is kept without asking the backend where each child is: a node is known to still
+//! be at the index it was placed at last run as long as, in its parent, nothing was created or
+//! moved earlier in this run, and nothing changed it from outside (if the backend can watch for
+//! that, see [`Backend::watch_children`](crate::Backend::watch_children)).
 
 use std::{
     any::Any,
@@ -23,12 +23,13 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use ahash::AHashMap;
-use godot::{classes::Node, global::godot_warn, prelude::*};
 use nohash_hasher::IntMap;
 use smallvec::SmallVec;
 
-use crate::builder::PathElem;
+use crate::{
+    backend::{Backend, ConnId, DynBackend, NodeId},
+    builder::PathElem,
+};
 
 pub(crate) type CtxRef = Rc<RefCell<Ctx>>;
 
@@ -65,17 +66,17 @@ enum Kind {
     /// A branch of an `if`/`match` or an iteration of a `for`.
     Scope,
     Node {
-        node: Gd<Node>,
+        node: NodeId,
         conns: SmallVec<[Conn; 1]>,
         /// Index this node was placed at in its parent, last run.
         last_idx: i32,
-        /// Set by `child_order_changed`; created once the node gets children.
-        order_changed: Option<Rc<Cell<bool>>>,
+        /// Whether outside changes to its children are watched; set up once it gets children.
+        order_changed: Watch,
     },
     State(Box<dyn Any>),
     Memo {
         value: Box<dyn Any>,
-        /// Godot children of the enclosing node that this memo placed, in order.
+        /// Children of the enclosing node that this memo placed, in order.
         slots: Vec<u64>,
         /// Index of the first slot, last run.
         start: i32,
@@ -87,10 +88,19 @@ enum Kind {
     },
 }
 
+enum Watch {
+    /// Not asked yet.
+    Unasked,
+    /// The backend can't: every child's index is checked.
+    No,
+    /// Set by the backend when the children change.
+    Yes(Rc<Cell<bool>>),
+}
+
 /// One connection per (node, signal), shared by every `ON` for that signal.
 struct Conn {
     name: &'static str,
-    callable: Callable,
+    id: ConnId,
     refs: u32,
 }
 
@@ -122,12 +132,16 @@ enum FrameKind {
 struct Pending {
     node_key: u64,
     name: &'static str,
-    args: SmallVec<[Variant; 4]>,
+    /// The backend's `Event`.
+    args: Box<dyn Any>,
     consumed: bool,
 }
 
 pub(crate) struct Ctx {
-    root: Gd<Node>,
+    backend: Rc<dyn DynBackend>,
+    /// The same backend, as an `Rc<B>` (for typed handles and creating nodes).
+    backend_any: Box<dyn Any>,
+    root: NodeId,
     this: Weak<RefCell<Ctx>>,
     entries: IntMap<u64, Entry>,
     stack: Vec<Frame>,
@@ -136,14 +150,15 @@ pub(crate) struct Ctx {
     running: bool,
     pending: Vec<Pending>,
     pool: Vec<Vec<u64>>,
-    snames: AHashMap<(usize, usize), StringName>,
     warned_duplicate_key: bool,
 }
 
 impl Ctx {
-    pub(crate) fn new(root: Gd<Node>) -> CtxRef {
+    pub(crate) fn new<B: Backend>(backend: Rc<B>, root: NodeId) -> CtxRef {
         Rc::new_cyclic(|this| {
             RefCell::new(Ctx {
+                backend: backend.clone(),
+                backend_any: Box::new(backend),
                 root,
                 this: this.clone(),
                 entries: IntMap::default(),
@@ -153,7 +168,6 @@ impl Ctx {
                 running: false,
                 pending: Vec::new(),
                 pool: Vec::new(),
-                snames: AHashMap::default(),
                 warned_duplicate_key: false,
             })
         })
@@ -179,9 +193,9 @@ impl Ctx {
             .last_mut()
             .expect("echo: builder used outside of a run")
     }
-    fn node_of(&self, key: u64) -> &Gd<Node> {
+    fn node_of(&self, key: u64) -> NodeId {
         match &self.entries[&key].kind {
-            Kind::Node { node, .. } => node,
+            Kind::Node { node, .. } => *node,
             _ => unreachable!(),
         }
     }
@@ -189,14 +203,21 @@ impl Ctx {
         self.stack[self.top().node_frame].key
     }
 
+    pub(crate) fn warn(&self, message: &str) {
+        self.backend.warn(message);
+    }
     pub(crate) fn running(&self) -> bool {
         self.running
     }
     pub(crate) fn force_memo(&self) -> bool {
         self.force_memo
     }
-    pub(crate) fn current_node(&self) -> &Gd<Node> {
+    pub(crate) fn current_node(&self) -> NodeId {
         self.node_of(self.current_node_key())
+    }
+    /// The backend, as the `Rc<B>` it was given as.
+    pub(crate) fn backend_any(&self) -> &dyn Any {
+        &*self.backend_any
     }
     pub(crate) fn current_is_new(&self) -> bool {
         match &self.stack[self.top().node_frame].kind {
@@ -207,25 +228,6 @@ impl Ctx {
     pub(crate) fn path(&self) -> Vec<PathElem> {
         self.stack.iter().filter_map(|f| f.elem).collect()
     }
-    /// The current node, and `name` as a (cached) `StringName`.
-    pub(crate) fn node_and_name(&mut self, name: &'static str) -> (&mut Gd<Node>, &StringName) {
-        let key = self.current_node_key();
-        let Ctx {
-            entries, snames, ..
-        } = self;
-        let Some(Entry {
-            kind: Kind::Node { node, .. },
-            ..
-        }) = entries.get_mut(&key)
-        else {
-            unreachable!()
-        };
-        let sname = snames
-            .entry((name.as_ptr() as usize, name.len()))
-            .or_insert_with(|| StringName::from(name));
-        (node, sname)
-    }
-
     // ---- run lifecycle ------------------------------------------------------------------------
 
     pub(crate) fn begin_run(&mut self, force_memo: bool) {
@@ -242,10 +244,10 @@ impl Ctx {
                     seen: 0,
                     children: Vec::new(),
                     kind: Kind::Node {
-                        node: self.root.clone(),
+                        node: self.root,
                         conns: SmallVec::new(),
                         last_idx: -1,
-                        order_changed: None,
+                        order_changed: Watch::Unasked,
                     },
                 },
             );
@@ -387,10 +389,10 @@ impl Ctx {
             };
             let mut children_in_freed = in_freed;
             match entry.kind {
-                Kind::Node { mut node, .. } => {
-                    // Descendants go away with their Godot ancestor.
-                    if !in_freed && node.is_instance_valid() && !node.is_queued_for_deletion() {
-                        node.queue_free();
+                Kind::Node { node, .. } => {
+                    // Descendants go away with their removed ancestor.
+                    if !in_freed && self.backend.alive(node) {
+                        self.backend.remove(node);
                     }
                     children_in_freed = true;
                 }
@@ -407,7 +409,7 @@ impl Ctx {
     fn take_clean(&mut self, key: u64) -> bool {
         match &self.entries[&key].kind {
             Kind::Node {
-                order_changed: Some(c),
+                order_changed: Watch::Yes(c),
                 ..
             } => !c.replace(false),
             _ => false,
@@ -422,7 +424,7 @@ impl Ctx {
         clean
             && match &self.entries[&self.stack[nf].key].kind {
                 Kind::Node {
-                    order_changed: Some(c),
+                    order_changed: Watch::Yes(c),
                     ..
                 } => !c.get(),
                 _ => false,
@@ -458,16 +460,18 @@ impl Ctx {
         let known = clean && !created && *last_idx == idx;
         *last_idx = idx;
         if !known {
-            let node = node.clone();
-            let current = node.get_index();
-            if current != idx || created {
-                let mut parent = self.node_of(parent_key).clone();
-                if current != idx {
-                    if current < 0 {
-                        // removed from its parent behind our back
-                        parent.add_child(&node);
-                    }
-                    parent.move_child(&node, idx);
+            let node = *node;
+            // (a node that isn't where it should be may also have been removed from its parent
+            // behind our back: `place` puts it back)
+            let current = if created {
+                None
+            } else {
+                self.backend.index(node)
+            };
+            if created || current != Some(idx as usize) {
+                if current != Some(idx as usize) {
+                    let parent = self.node_of(parent_key);
+                    self.backend.place(parent, node, idx as usize);
                 }
                 if let FrameKind::Node { clean, .. } = &mut self.stack[nf].kind {
                     *clean = false;
@@ -484,7 +488,7 @@ impl Ctx {
             kind:
                 Kind::Node {
                     node,
-                    order_changed: order_changed @ None,
+                    order_changed: order_changed @ Watch::Unasked,
                     ..
                 },
             ..
@@ -493,31 +497,30 @@ impl Ctx {
             return;
         };
         let cell = Rc::new(Cell::new(false));
-        let flag = cell.clone();
-        node.connect(
-            "child_order_changed",
-            &Callable::from_fn("echo child order", move |_| flag.set(true)),
-        );
-        *order_changed = Some(cell);
+        *order_changed = if self.backend.watch_children(*node, cell.clone()) {
+            Watch::Yes(cell)
+        } else {
+            Watch::No
+        };
     }
 
-    pub(crate) fn enter_node(&mut self, create: fn() -> Gd<Node>) -> usize {
+    /// `create` makes the node, given the backend as an `Rc<B>`, if there isn't one at this
+    /// position yet.
+    pub(crate) fn enter_node(&mut self, create: fn(&dyn Any) -> NodeId) -> usize {
         let (key, elem) = self.next_pos();
         let exists = matches!(
             self.entries.get(&key),
-            Some(Entry { kind: Kind::Node { node, .. }, .. }) if node.is_instance_valid()
+            Some(Entry { kind: Kind::Node { node, .. }, .. }) if self.backend.alive(*node)
         );
         if !exists {
-            let node = create();
-            let mut parent = self.current_node().clone();
-            parent.add_child(&node);
+            let node = create(&*self.backend_any);
             self.insert(
                 key,
                 Kind::Node {
                     node,
                     conns: SmallVec::new(),
                     last_idx: -1,
-                    order_changed: None,
+                    order_changed: Watch::Unasked,
                 },
             );
         }
@@ -565,10 +568,10 @@ impl Ctx {
             // Same key twice in one loop: keep both, told apart by occurrence.
             if !self.warned_duplicate_key {
                 self.warned_duplicate_key = true;
-                godot_warn!(
+                self.backend.warn(&format!(
                     "echo: duplicate KEY in a `for` loop at {:?}; items with equal keys are told apart by order, so they may be recreated when the list changes",
                     self.path()
-                );
+                ));
             }
             dup += 1;
             key = derive_key(slot, Tag::Dup, hash_one((key_hash, dup)));
@@ -660,7 +663,7 @@ impl Ctx {
             for &k in &slots {
                 let alive = matches!(
                     self.entries.get(&k),
-                    Some(Entry { kind: Kind::Node { node, .. }, .. }) if node.is_instance_valid()
+                    Some(Entry { kind: Kind::Node { node, .. }, .. }) if self.backend.alive(*node)
                 );
                 if alive {
                     self.place(k, false);
@@ -700,12 +703,8 @@ impl Ctx {
     // ---- signals ------------------------------------------------------------------------------
 
     /// Registers an `ON(name)` in the current scope for the current node. Returns the
-    /// arguments of a pending emission of that signal, if there is one.
-    pub(crate) fn signal(
-        &mut self,
-        name: &'static str,
-        location: &'static std::panic::Location<'static>,
-    ) -> Option<SmallVec<[Variant; 4]>> {
+    /// arguments of a pending emission of that signal (the backend's `Event`), if there is one.
+    pub(crate) fn signal(&mut self, name: &'static str) -> Option<&dyn Any> {
         let top = self.top();
         let node_key = self.stack[top.node_frame].key;
         let key = derive_key(top.key, Tag::Signal, hash_one(name));
@@ -717,7 +716,7 @@ impl Ctx {
             })
         ) {
             self.insert(key, Kind::Signal { node_key, name });
-            self.acquire_conn(node_key, name, location);
+            self.acquire_conn(node_key, name);
         }
         self.mark(key);
 
@@ -729,15 +728,10 @@ impl Ctx {
             .iter_mut()
             .find(|p| p.node_key == node_key && p.name == name)?;
         p.consumed = true;
-        Some(p.args.clone())
+        Some(&*p.args)
     }
 
-    fn acquire_conn(
-        &mut self,
-        node_key: u64,
-        name: &'static str,
-        location: &'static std::panic::Location<'static>,
-    ) {
+    fn acquire_conn(&mut self, node_key: u64, name: &'static str) {
         let this = self.this.clone();
         let Some(Entry {
             kind: Kind::Node { node, conns, .. },
@@ -750,15 +744,12 @@ impl Ctx {
             conn.refs += 1;
             return;
         }
-        let callable = Callable::from_fn(format!("echo ON({name}) at {location}"), move |args| {
-            on_signal(&this, node_key, name, args)
-        });
-        node.connect(name, &callable);
-        conns.push(Conn {
+        let id = self.backend.connect(
+            *node,
             name,
-            callable,
-            refs: 1,
-        });
+            Box::new(move |args| on_signal(&this, node_key, name, args)),
+        );
+        conns.push(Conn { name, id, refs: 1 });
     }
 
     fn release_conn(&mut self, node_key: u64, name: &'static str) {
@@ -775,28 +766,27 @@ impl Ctx {
         conns[i].refs -= 1;
         if conns[i].refs == 0 {
             let conn = conns.swap_remove(i);
-            if node.is_instance_valid() && node.is_connected(name, &conn.callable) {
-                node.disconnect(name, &conn.callable);
+            if self.backend.alive(*node) {
+                self.backend.disconnect(*node, name, conn.id);
             }
         }
     }
 }
 
-fn on_signal(this: &Weak<RefCell<Ctx>>, node_key: u64, name: &'static str, args: &[&Variant]) {
+fn on_signal(this: &Weak<RefCell<Ctx>>, node_key: u64, name: &'static str, args: Box<dyn Any>) {
     let Some(ctx) = this.upgrade() else {
         return;
     };
-    let mut root = {
-        // Already borrowed or running means this was emitted by something echo itself did
-        // during a run (e.g. `UPDATE(value = ..)` makes a Range emit `value_changed`). That's
-        // not input, and re-entering the app from here would blow up, so it's dropped.
+    let (backend, root) = {
+        // Already borrowed or running means this was fired by something echo itself did during
+        // a run (e.g. `UPDATE(value = ..)` makes a slider fire `value_changed`). That's not
+        // input, and re-entering the app from here would blow up, so it's dropped.
         let Ok(mut ctx) = ctx.try_borrow_mut() else {
             return;
         };
         if ctx.running {
             return;
         }
-        let args: SmallVec<[Variant; 4]> = args.iter().map(|v| (*v).clone()).collect();
         match ctx
             .pending
             .iter_mut()
@@ -813,9 +803,10 @@ fn on_signal(this: &Weak<RefCell<Ctx>>, node_key: u64, name: &'static str, args:
                 consumed: false,
             }),
         }
-        ctx.root.clone()
+        (ctx.backend.clone(), ctx.root)
     };
-    if root.is_instance_valid() {
-        root.emit_signal("__echo_rerun", &[true.to_variant()]);
+    // not borrowed: this may run the app right away
+    if backend.alive(root) {
+        backend.request_rerun(root);
     }
 }

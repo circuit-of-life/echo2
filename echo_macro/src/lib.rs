@@ -39,8 +39,9 @@ impl Parse for RawFn {
 /// Turns a function written in the tree DSL into one that builds nodes.
 ///
 /// ```text
-/// #[tree]                          usable inside any node
-/// #[tree(in PanelContainer)]       only inside a PanelContainer (checked at compile time)
+/// #[tree]                          usable inside any node (an `AnyNode`)
+/// #[tree(in PanelContainer)]       only inside a PanelContainer (checked at compile time), and
+///                                  then it can also use that node (`ON`, `UPDATE`, `node()`)
 /// fn card(title: &str, body: Body<VBoxContainer, i32>) -> bool { .. }
 /// ```
 ///
@@ -52,11 +53,11 @@ impl Parse for RawFn {
 /// # Elements
 ///
 /// ```text
-/// Label..{ .. };                       a child node (any path: `my::Widget..{}`)
-/// let a = Label..{ .. };               ..and its `Gd<Label>`, for the code after it
+/// Label..{ .. };                       a child node (any `Create` element, any path)
+/// let a = Label..{ .. };               ..and its handle (the element's `Handle`), for later code
 /// INIT(text = "a", visible = false);   set properties when the node is created
 /// UPDATE(text = s.name.clone());       set properties on every run
-/// INIT(theme(color, font_color) = c);  theme overrides: color/constant/font/font_size/icon/stylebox
+/// UPDATE(theme_color("font") = c);     ..with arguments: `set_theme_color("font", c)`
 /// if ON(pressed) { .. }               true during the rerun caused by the signal
 /// if let Some(args) = ON(value_changed) { .. }   ..with the signal's arguments
 /// let mut x = STATE(init);            state kept at this place in the tree; `x` derefs to it
@@ -75,9 +76,15 @@ impl Parse for RawFn {
 /// { .. }                               a block scope, as in Rust (with elements in it too)
 /// ```
 ///
+/// A property `name = value` is set by calling `set_name(value)` on the node's handle, and
+/// `name(args..) = value` calls `set_name(args.., value)`: the backend's handle types decide
+/// which properties exist and what they take, and a typo or a wrong type is a compile error at
+/// the property's name.
+///
 /// `STATE`'s value is dropped when its element stops running, and comes back fresh.
 ///
-/// `ON(signal)` is an `Option<args>` expression for the current node's signal and can be used
+/// `ON(signal)` is an `Option<args>` expression (the backend's `Event`) for the current node's
+/// signal and can be used
 /// anywhere; as an `if`'s whole condition it means "fired". The signal stays connected while
 /// its `ON` keeps being evaluated. Check a node's events before the `UPDATE`s that show what
 /// they change: code runs top to bottom, so otherwise the run caused by the signal first sets
@@ -125,7 +132,7 @@ pub fn tree(
     };
     let usable = attr
         .usable
-        .map_or_else(|| quote! { ::godot::classes::Node }, |u| quote! { #u });
+        .map_or_else(|| quote! { ::echo::AnyNode }, |u| quote! { #u });
     let has_self = matches!(sig.inputs.first(), Some(FnArg::Receiver(_)));
     sig.inputs.insert(
         if has_self { 1 } else { 0 },
@@ -203,7 +210,7 @@ mod tests {
             "#,
         );
         assert!(out.contains("compile_error"));
-        assert!(out.contains(r#"__set_prop ("text" , "ok")"#), "{out}");
+        assert!(out.contains(r#"__node . set_text ("ok") ;"#), "{out}");
     }
 
     #[test]
@@ -236,15 +243,12 @@ mod tests {
             r#"
             let r = 0..5;
             x += 1;
-            godot::classes::Label..{};
+            ui::Label..{};
             "#,
         );
         assert!(!out.contains("compile_error"), "{out}");
         assert!(out.contains("let r = 0 .. 5 ;"), "{out}");
-        assert!(
-            out.contains("__child :: < godot :: classes :: Label >"),
-            "{out}"
-        );
+        assert!(out.contains("__child :: < ui :: Label >"), "{out}");
     }
 
     #[test]
@@ -441,7 +445,7 @@ mod tests {
         );
         assert!(!out.contains("compile_error"), "{out}");
         assert!(
-            out.contains("let row = | __builder : :: echo :: Builder < :: godot :: classes :: Node > , name : & str , __body : :: echo :: Body < '_ > |"),
+            out.contains("let row = | __builder : :: echo :: Builder < :: echo :: AnyNode > , name : & str , __body : :: echo :: Body < '_ > |"),
             "{out}"
         );
         assert!(
@@ -598,10 +602,7 @@ mod tests {
         let fnmut = |lt: &str, n: &str, a: &str| {
             format!("& {lt}mut dyn :: core :: ops :: FnMut (:: echo :: Builder < {n} > , {a})")
         };
-        assert_eq!(
-            expand("Body"),
-            Some(fnmut("", ":: godot :: classes :: Node", "()"))
-        );
+        assert_eq!(expand("Body"), Some(fnmut("", ":: echo :: AnyNode", "()")));
         assert_eq!(expand("Body<Label>"), Some(fnmut("", "Label", "()")));
         assert_eq!(
             expand("echo::Body<Label, &str>"),
@@ -617,7 +618,24 @@ mod tests {
     #[test]
     fn raw_identifier_props() {
         let out = expand("INIT(r#type = 1);");
-        assert!(out.contains(r#"__set_prop ("type" , 1)"#), "{out}");
+        assert!(out.contains("__node . set_type (1) ;"), "{out}");
+    }
+
+    #[test]
+    fn props_are_setter_calls() {
+        let out = expand(r#"UPDATE(text = a, theme_color("font_color") = c, at(1, 2,) = v);"#);
+        assert!(
+            out.contains(r#"{ # [allow (unused_mut)] let mut __node = __builder . node () ; __node . set_text (a) ; __node . set_theme_color ("font_color" , c) ; __node . set_at (1 , 2 , v) ; }"#),
+            "{out}"
+        );
+        // INIT: once, when the node is new
+        let out = expand("INIT(text = a);");
+        assert!(
+            out.starts_with("if __builder . init () { # [allow (unused_mut)] let mut __node"),
+            "{out}"
+        );
+        // and setting properties never needs a scope
+        assert!(!expand("if x { UPDATE(text = 1); }").contains("__slot"));
     }
 
     #[test]

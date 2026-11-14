@@ -1,23 +1,17 @@
 use std::{
+    any::Any,
     cell::{Cell, UnsafeCell},
     fmt,
     hash::Hash,
     marker::PhantomData,
     ops::{Deref, DerefMut},
-    panic::Location,
     rc::Rc,
 };
 
-use godot::{
-    classes::{Control, Font, Node, StyleBox, Texture2D},
-    meta::AsArg,
-    obj::{Gd, Inherits, NewAlloc},
-    prelude::*,
+use crate::{
+    backend::{AnyNode, Backend, Create, Element, Is, NodeId},
+    ctx::{CtxRef, hash_one},
 };
-
-use smallvec::SmallVec;
-
-use crate::ctx::{CtxRef, hash_one};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PathElem {
@@ -41,10 +35,10 @@ pub enum PathElem {
 ///
 /// In a tree function's or tree closure's signature, the macro writes it out as
 /// `&mut dyn FnMut(Builder<N>, A)`, so references in `A` can be borrows of the function's own
-/// locals (`Body<Node, &str>` takes any `&str`, however short-lived).
+/// locals (`Body<AnyNode, &str>` takes any `&str`, however short-lived).
 ///
 /// Written by hand (calling a tree function from plain Rust), an empty body is `&mut |_, _| {}`.
-pub type Body<'a, N = Node, A = ()> = &'a mut dyn FnMut(Builder<N>, A);
+pub type Body<'a, N = AnyNode, A = ()> = &'a mut dyn FnMut(Builder<N>, A);
 
 #[doc(hidden)]
 pub struct StateCell<T> {
@@ -105,10 +99,12 @@ impl<T: fmt::Display> fmt::Display for StateMut<T> {
     }
 }
 
-/// A handle to the scope the tree code is currently building, typed by the node it builds.
+/// A handle to the scope the tree code is currently building, typed by the [`Element`] it
+/// builds ([`AnyNode`] where it can be any).
 ///
 /// It is cheap to clone, and the type parameter is only a compile-time view: [`cast`](Self::cast)
-/// and [`upcast`](Self::upcast) are free, and [`node`](Self::node) does the checked conversion.
+/// and [`upcast`](Self::upcast) are free, and [`node`](Self::node) asks the element for a
+/// handle to the node.
 pub struct Builder<P> {
     ctx: CtxRef,
     _p: PhantomData<P>,
@@ -153,8 +149,15 @@ impl __MemoScope {
     }
 }
 
-fn new_node<C: Inherits<Node> + NewAlloc>() -> Gd<Node> {
-    C::new_alloc().upcast()
+/// Creates a `C`, given the app's backend as an `Rc<B>`.
+fn new_node<C: Create>(backend: &dyn Any) -> NodeId {
+    C::create(backend_of::<C>(backend))
+}
+
+fn backend_of<C: Element>(backend: &dyn Any) -> &Rc<C::Backend> {
+    backend
+        .downcast_ref::<Rc<C::Backend>>()
+        .expect("echo: an element of another backend than the app's")
 }
 
 // Most methods are deliberately unbounded: a bound here is one more obligation the type checker
@@ -174,7 +177,7 @@ impl<P> Builder<P> {
     }
 
     #[doc(hidden)]
-    pub fn __child<C: Inherits<Node> + NewAlloc>(&self) -> (__Scope, Builder<C>) {
+    pub fn __child<C: Create>(&self) -> (__Scope, Builder<C>) {
         let depth = self.ctx.borrow_mut().enter_node(new_node::<C>);
         (self.scope(depth), Builder::new(self.ctx.clone()))
     }
@@ -245,22 +248,6 @@ impl<P> Builder<P> {
         }))
     }
 
-    #[doc(hidden)]
-    pub fn __set_prop<T: ToGodot>(&self, prop: &'static str, value: T) {
-        let value = value.to_variant();
-        let mut ctx = self.ctx.borrow_mut();
-        let (node, name) = ctx.node_and_name(prop);
-        node.set(name, &value);
-    }
-
-    /// What `ON(signal)` lowers to: registers the signal for the current node and returns the
-    /// arguments of its pending emission, if any.
-    #[doc(hidden)]
-    #[track_caller]
-    pub fn __signal(&self, signal: &'static str) -> Option<SmallVec<[Variant; 4]>> {
-        self.ctx.borrow_mut().signal(signal, Location::caller())
-    }
-
     /// The position of the current scope (for debugging).
     pub fn path(&self) -> Vec<PathElem> {
         self.ctx.borrow().path()
@@ -275,59 +262,40 @@ impl<P> Builder<P> {
     }
 }
 
-impl<P: Inherits<Node>> Builder<P> {
-    /// Reinterprets the builder as building a more derived class. The node isn't checked
-    /// until [`node`](Self::node) is called.
+impl<P> Builder<P> {
+    /// Reinterprets the builder as building a more specific kind of node. Nothing is checked
+    /// here; [`node`](Self::node) asks the element for a handle, which may.
     #[inline]
-    pub fn cast<T: Inherits<Node> + Inherits<P>>(self) -> Builder<T> {
+    pub fn cast<T: Is<P>>(self) -> Builder<T> {
         Builder::new(self.ctx)
     }
+    /// Views the builder as building a less specific kind of node (or [`AnyNode`]).
     #[inline]
-    pub fn upcast<T: Inherits<Node>>(self) -> Builder<T>
+    pub fn upcast<T>(self) -> Builder<T>
     where
-        P: Inherits<T>,
+        P: Is<T>,
     {
         Builder::new(self.ctx)
     }
-
-    /// The node being built.
-    pub fn node(&self) -> Gd<P> {
-        self.ctx.borrow().current_node().clone().cast()
-    }
 }
 
-impl<P: Inherits<Control> + Inherits<Node>> Builder<P> {
-    fn with_control(&self, prop: &'static str, f: impl FnOnce(&mut Gd<Control>, &StringName)) {
+impl<P: Element> Builder<P> {
+    /// The node being built.
+    pub fn node(&self) -> P::Handle {
+        let ctx = self.ctx.borrow();
+        P::handle(backend_of::<P>(ctx.backend_any()), ctx.current_node())
+    }
+
+    /// What `ON(signal)` lowers to: registers the signal for the current node and returns the
+    /// arguments of its pending emission, if any.
+    #[doc(hidden)]
+    pub fn __signal(&self, signal: &'static str) -> Option<<P::Backend as Backend>::Event> {
         let mut ctx = self.ctx.borrow_mut();
-        let (node, name) = ctx.node_and_name(prop);
-        f(&mut node.clone().cast::<Control>(), name);
-    }
-    #[doc(hidden)]
-    pub fn __set_theme_color_override(&self, prop: &'static str, value: Color) {
-        self.with_control(prop, |c, name| c.add_theme_color_override(name, value));
-    }
-    #[doc(hidden)]
-    pub fn __set_theme_constant_override(&self, prop: &'static str, value: i32) {
-        self.with_control(prop, |c, name| c.add_theme_constant_override(name, value));
-    }
-    #[doc(hidden)]
-    pub fn __set_theme_font_override(&self, prop: &'static str, value: impl AsArg<Gd<Font>>) {
-        self.with_control(prop, |c, name| c.add_theme_font_override(name, value));
-    }
-    #[doc(hidden)]
-    pub fn __set_theme_font_size_override(&self, prop: &'static str, value: i32) {
-        self.with_control(prop, |c, name| c.add_theme_font_size_override(name, value));
-    }
-    #[doc(hidden)]
-    pub fn __set_theme_icon_override(&self, prop: &'static str, value: impl AsArg<Gd<Texture2D>>) {
-        self.with_control(prop, |c, name| c.add_theme_icon_override(name, value));
-    }
-    #[doc(hidden)]
-    pub fn __set_theme_stylebox_override(
-        &self,
-        prop: &'static str,
-        value: impl AsArg<Gd<StyleBox>>,
-    ) {
-        self.with_control(prop, |c, name| c.add_theme_stylebox_override(name, value));
+        let args = ctx.signal(signal)?;
+        Some(
+            args.downcast_ref::<<P::Backend as Backend>::Event>()
+                .expect("echo: an event of another backend than the app's")
+                .clone(),
+        )
     }
 }

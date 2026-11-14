@@ -1,5 +1,7 @@
 [workspace]
-members = ["echo", "echo_macro", "echo_tests", "echo_examples"]
+members = ["echo", "echo_macro"]
+# Godot-based; they need a Godot backend, which this branch doesn't have (yet)
+exclude = ["echo_tests", "echo_examples", "locus"]
 resolver = "3"
 
 

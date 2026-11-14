@@ -1,13 +1,7 @@
-use std::marker::PhantomData;
-
-use godot::{
-    classes::Node,
-    global::godot_warn,
-    obj::{Gd, Inherits},
-    prelude::*,
-};
+use std::{marker::PhantomData, rc::Rc};
 
 use crate::{
+    backend::{Element, NodeId},
     builder::Builder,
     ctx::{Ctx, CtxRef},
 };
@@ -24,15 +18,15 @@ use crate::{
 /// `App` is a cheap handle: clones share the same tree. That lets the app live inside the state it
 /// runs with (`let app = self.app.clone().unwrap(); app.run(false, |b| ui(b, self, ..))`).
 ///
-/// When a node connected with `ON(..)` emits its signal, `root` emits `__echo_rerun(force_memo)`.
-/// Respond by calling `run(force_memo, ..)` with the same view, so the `ON` handler gets to see
-/// the event.
-pub struct App<R: Inherits<Node>> {
+/// When an event an `ON(..)` waits for fires, the backend's
+/// [`request_rerun`](crate::Backend::request_rerun) is called. Respond by calling `run(true, ..)` with
+/// the same view, so the `ON` handler gets to see the event.
+pub struct App<R: Element> {
     ctx: CtxRef,
     _root: PhantomData<fn() -> R>,
 }
 
-impl<R: Inherits<Node>> Clone for App<R> {
+impl<R: Element> Clone for App<R> {
     fn clone(&self) -> Self {
         Self {
             ctx: self.ctx.clone(),
@@ -41,19 +35,11 @@ impl<R: Inherits<Node>> Clone for App<R> {
     }
 }
 
-impl<R: Inherits<Node>> App<R> {
-    /// An app that builds its views under `root`. Adds the `__echo_rerun(force_memo)` signal to
-    /// `root`.
-    pub fn new(mut root: Gd<R>) -> Self {
-        root.upcast_mut()
-            .add_user_signal_ex("__echo_rerun")
-            .arguments(
-                &varray![&vdict! { "name" => "force_memo", "type" => VariantType::BOOL }]
-                    .upcast_any_array(),
-            )
-            .done();
+impl<R: Element> App<R> {
+    /// An app that builds its views under `root`, a node of `backend`'s.
+    pub fn new(backend: Rc<R::Backend>, root: NodeId) -> Self {
         Self {
-            ctx: Ctx::new(root.upcast()),
+            ctx: Ctx::new(backend, root),
             _root: PhantomData,
         }
     }
@@ -79,10 +65,11 @@ impl<R: Inherits<Node>> App<R> {
                 ctx.begin_run(force_memo);
                 true
             }
-            _ => {
-                godot_warn!("echo: `App::run` called while the app is already running; ignored");
+            Ok(ctx) => {
+                ctx.warn("echo: `App::run` called while the app is already running; ignored");
                 false
             }
+            Err(_) => false,
         }
     }
 }
