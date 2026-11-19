@@ -6,7 +6,7 @@ use std::{
 };
 
 use echo::{
-    AnyNode, Body, EchoApp,
+    AnyNode, App, Body,
     memory::{
         Button, HBoxContainer, HSlider, Handle, Label, LineEdit, Memory, Node, PanelContainer,
         VBoxContainer, Value,
@@ -2110,7 +2110,7 @@ fn borrowed_view(n: &mut i32, scene: &mut Scene<'_>) {
 fn borrowed_state() -> Result<(), String> {
     let memory = Memory::new();
     let root = memory.root();
-    let app = EchoApp::<Node>::new(memory.clone(), root.id());
+    let app = App::<Node>::new(memory.clone(), root.id());
     // the view borrows from two places, one of them a fresh `Scene<'_>` for every run
     let mut n = 1;
     let mut text = String::from("a");

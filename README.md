@@ -51,6 +51,11 @@ tree operations, and an `Element` type for each kind of node the tree code names
 element types (`Label`, `Button`, `LineEdit`, `HSlider`, containers). It's what echo's own tests
 run on, and it works for testing your tree code too.
 
+[`echo_egui`](echo_egui/src/lib.rs) is an experimental egui backend: Godot's Control nodes
+(buttons, labels, ranges, line edits, containers, popups, ..) with their Godot names, properties
+and signals, kept in a tree and drawn with egui every frame. `cargo run -p echo_egui --example
+gallery` shows them.
+
 There's no Godot backend on this branch yet; `echo_tests` and `echo_examples` are the Godot
 versions of the tests and examples, left out of the workspace until there is one.
 

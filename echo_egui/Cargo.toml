@@ -1,0 +1,13 @@
+[package]
+name = "echo_egui"
+version = "0.1.0"
+edition = "2024"
+description = "An experimental egui backend for echo: Godot-like Control nodes, drawn with egui"
+
+[dependencies]
+echo = { path = "../echo" }
+egui = "0.36"
+
+[dev-dependencies]
+eframe = "0.36"
+egui_kittest = { version = "0.36", features = ["wgpu", "snapshot"] }

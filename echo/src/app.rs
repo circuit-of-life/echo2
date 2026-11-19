@@ -21,12 +21,12 @@ use crate::{
 /// When an event an `ON(..)` waits for fires, the backend's
 /// [`request_rerun`](crate::Backend::request_rerun) is called. Respond by calling `run(true, ..)` with
 /// the same view, so the `ON` handler gets to see the event.
-pub struct EchoApp<R: Element> {
+pub struct App<R: Element> {
     ctx: CtxRef,
     _root: PhantomData<fn() -> R>,
 }
 
-impl<R: Element> Clone for EchoApp<R> {
+impl<R: Element> Clone for App<R> {
     fn clone(&self) -> Self {
         Self {
             ctx: self.ctx.clone(),
@@ -35,7 +35,7 @@ impl<R: Element> Clone for EchoApp<R> {
     }
 }
 
-impl<R: Element> EchoApp<R> {
+impl<R: Element> App<R> {
     /// An app that builds its views under `root`, a node of `backend`'s.
     pub fn new(backend: Rc<R::Backend>, root: NodeId) -> Self {
         Self {

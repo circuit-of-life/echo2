@@ -9,7 +9,7 @@ mod builder;
 mod ctx;
 pub mod memory;
 
-pub use app::EchoApp;
+pub use app::App;
 pub use backend::{AnyNode, Backend, ConnId, Create, Element, Is, NodeId};
 pub use builder::{
     __MemoScope, __Scope, Body, Builder, PathElem, StateCell as __StateCell, StateMut,

@@ -34,7 +34,7 @@ const EXPECTED_ELEMENT: &str = "expected an element: `Node..{ .. };`, `func(..).
 /// A list of elements. Elements that fail to parse are kept as errors, so the rest of the
 /// function still expands (and rust-analyzer keeps working in it).
 pub struct Block {
-    elems: Vec<syn::Result<BlockElem>>,
+    pub elems: Vec<syn::Result<BlockElem>>,
 }
 
 #[allow(clippy::large_enum_variant)] // parse-time only
@@ -140,20 +140,20 @@ impl Parse for TreeAttr {
 }
 
 pub struct IfElem {
-    cond: Expr,
-    body: Block,
-    else_expr: Option<Either<Box<IfElem>, Block>>,
+    pub cond: Expr,
+    pub body: Block,
+    pub else_expr: Option<Either<Box<IfElem>, Block>>,
 }
 pub struct Arm {
-    pat: Pat,
-    guard: Option<Expr>,
-    body: Block,
+    pub pat: Pat,
+    pub guard: Option<Expr>,
+    pub body: Block,
 }
 /// `name = value`, or `name(args..) = value`: `__node.set_name(args.., value)`.
 pub struct Assignment {
-    name: Ident,
-    args: Option<Punctuated<Expr, Token![,]>>,
-    value: Expr,
+    pub name: Ident,
+    pub args: Option<Punctuated<Expr, Token![,]>>,
+    pub value: Expr,
 }
 
 /// Parses `T` from the whole of `input` (allowing a trailing comma), rejecting leftovers.
