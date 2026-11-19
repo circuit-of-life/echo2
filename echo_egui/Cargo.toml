@@ -6,8 +6,8 @@ description = "An experimental egui backend for echo: Godot-like Control nodes, 
 
 [dependencies]
 echo = { path = "../echo" }
-egui = "0.36"
+egui = "0.37"
 
 [dev-dependencies]
-eframe = "0.36"
-egui_kittest = { version = "0.36", features = ["wgpu", "snapshot"] }
+eframe = "0.37"
+egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }
