@@ -61,6 +61,7 @@ pub use handle::{Handle, HasColor, HasText};
 pub use value::{FromValue, ScrollMode, SizeFlags, Value};
 
 /// An echo app drawn with egui. Make one, then call [`show`](Self::show) every frame.
+#[derive(Clone)]
 pub struct EguiApp {
     egui: Rc<Egui>,
     app: App<Node>,
