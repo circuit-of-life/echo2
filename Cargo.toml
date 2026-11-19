@@ -1,12 +1,9 @@
 [workspace]
-members = ["echo", "echo_macro", "echo_egui", "echo_export"]
-# Godot-based; they need a Godot backend, which this branch doesn't have (yet)
-exclude = ["echo_tests", "echo_examples", "locus"]
+members = ["echo", "echo_macro", "echo_egui"]
 resolver = "3"
 
 
 [workspace.dependencies]
-godot = "0.5.5"
 ahash = "0.8.12"
 nohash-hasher = "0.2.0"
 smallvec = "1.15.1"
